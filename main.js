@@ -88,9 +88,22 @@ function oneRound() {
         LOG.info("检测到残留广告页，先退出");
         W.exitAd();
         sleep(1200);
-    } else if (F.isLivePage()) {
+    }
+    if (F.isFloatGuide()) {
+        LOG.info("检测到「悬浮窗播放功能上线啦」引导弹窗，先关掉");
+        F.dismissFloatGuide();
+        sleep(800);
+    }
+    if (F.isLivePage()) {
         LOG.info("检测到残留直播间，先退出");
         F.closeLive();
+        sleep(800);
+    }
+    // 残留的「第N天畅听」面板会盖住发现页，先关掉
+    F.invalidate();
+    if (F.isPanelVisible()) {
+        LOG.info("检测到残留天数面板，先关掉");
+        F.closePanel();
     }
 
     // 3. 确保 App 在前台
@@ -111,9 +124,25 @@ function oneRound() {
  * 返回 success / fail / noad / abnormal / manual / noentry（没找到入口，交给备用路径）
  */
 function runFreeRound() {
+    // 先关掉可能还盖在发现页上的天数面板，再回发现页
+    F.invalidate();
+    if (F.isPanelVisible()) F.closePanel();
+
     if (!W.goDiscover()) LOG.warn("没能回到发现页");
     sleep(1000);
-    F.closePanel();
+
+    // 【实测坑】点完 × 之后 AnimatedCommercialSheetDialog 这个宿主 Activity 会残留成空壳，
+    // 一直挂在前台，点「免N天」的坐标其实打在空壳上。这里按一次返回键把它清掉。
+    if (W.activity().indexOf("hybrid.dialog") >= 0 && !F.isPanelVisible()) {
+        LOG.info("残留营销弹窗空壳，按返回键清掉");
+        try {
+            back();
+        } catch (e) {
+            // 忽略
+        }
+        sleep(1200);
+        W.invalidate();
+    }
 
     var before = F.readDays();
     LOG.info("当前免费畅听天数: " + (before >= 0 ? "免" + before + "天" : "未读到（OCR 不可用）"));
@@ -123,22 +152,26 @@ function runFreeRound() {
     var enter = F.waitEnterAd();
     if (enter === "risk") return "manual";
     if (enter === "live") {
-        LOG.warn("命中直播间形式广告，退出换一条");
-        F.closeLive();
-        return "noad";
+        // 直播间形式的广告同样计时计奖励（实测看够时长后广告容器里也有「领取成功」），
+        // 所以不再「退出换一条」，而是等它播完，然后走和激励视频一样的领奖/面板流程
+        var liveResult = F.watchLiveAd();
+        if (liveResult !== "done") return "noad";
+        LOG.step("直播间广告已领取，继续走领奖流程");
     }
-    if (enter !== "ad") {
+    if (enter !== "ad" && enter !== "live") {
         LOG.warn("点了「免N天」没进广告（当前 " + W.activity() + "）");
         return "noad";
     }
 
-    if (!Ads.waitAdFinish()) {
-        LOG.warn("没识别到有效倒计时");
-        W.exitAd();
-        return "noad";
+    var claimResult = 0;
+    if (enter === "ad") {
+        if (!Ads.waitAdFinish()) {
+            LOG.warn("没识别到有效倒计时");
+            W.exitAd();
+            return "noad";
+        }
+        claimResult = Ads.claim();
     }
-
-    var claimResult = Ads.claim();
 
     // 广告里的「再看X秒继续解锁 / 第N日免费听」→ 点「坚持退出」回 App
     F.closeContinueDialog();
@@ -180,7 +213,9 @@ function runFreeRound() {
             return "success";
         }
         LOG.info("已领取天数仍是第" + panel.day + "天，本条广告计入提前解锁进度（尚未 +1 天）");
-        return "fail";
+        // 这是正常状态：免费畅听越往后每天要看的条数越多（面板浮层直接写「再看N个视频」），
+        // 单条看完天数不涨是设计如此，不能算空转，否则会每 3 轮就无谓重启一次 App
+        return "progress";
     }
 
     if (claimResult === -1) return "abnormal";
@@ -279,13 +314,30 @@ function main() {
     LOG.info("OCR 可用: " + ocrOk + (ocrOk ? "" : "（未装 OCR 插件，走控件+坐标模式）"));
     F.loadProgress();
 
-    if (!App.launch(3)) {
+    // 免费畅听封顶 30 天：到顶后当天不会再给广告，硬刷只会一直 noad
+    if (F.claimedDay() >= CFG.FREE_DAYS_MAX) {
+        LOG.step("已领取到第 " + F.claimedDay() + " 天，免费畅听封顶 " + CFG.FREE_DAYS_MAX + " 天，今天不用再刷了");
+        toast("免费畅听已满 " + CFG.FREE_DAYS_MAX + " 天，明天再来");
+        LOG.raw("=== 今日已满，退出 ===");
+        return;
+    }
+
+    var launched = App.launch(3);
+    var bootTry = 0;
+    while (!launched && bootTry < 4) {
+        bootTry++;
+        LOG.warn("启动失败，3 秒后第 " + bootTry + " 次重试启动");
+        sleep(3000);
+        launched = App.launch(3);
+    }
+    if (!launched) {
         LOG.err("无法启动 " + CFG.APP_NAME + "，请确认已安装并已登录");
         summary();
         return;
     }
 
     var idleStreak = 0;
+    var noadStreak = 0;
     var memberStreak = 0;
     var loop = 0;
 
@@ -309,17 +361,33 @@ function main() {
         if (result === "success") {
             stats.success++;
             idleStreak = 0;
+            noadStreak = 0;
             memberStreak = 0;
             LOG.step("第 " + loop + " 轮领取成功（累计 " + stats.success + " 次）");
             if (CFG.TOAST_EACH_ROUND) toast("第 " + stats.success + " 次领取成功");
         } else if (result === "noad") {
             stats.noAd++;
-            idleStreak++;
-            LOG.warn("第 " + loop + " 轮没有广告可看（累计空转 " + idleStreak + "）");
+            noadStreak++;
+            LOG.warn("第 " + loop + " 轮没有广告可看（连续 " + noadStreak + "/" + CFG.NOAD_RESTART_COUNT + "）");
+            if (noadStreak >= CFG.NOAD_RESTART_COUNT) {
+                LOG.warn("连续 " + noadStreak + " 轮拿不到广告（多半是今天的额度已满或广告池没货），" +
+                    "重启 App 并休息 " + Math.round(CFG.NOAD_RESTART_SLEEP / 60000) + " 分钟再说");
+                App.restart();
+                sleep(CFG.NOAD_RESTART_SLEEP);
+                noadStreak = 0;
+                idleStreak = 0;
+                continue;
+            }
         } else if (result === "abnormal") {
             stats.abnormal++;
             idleStreak++;
             LOG.warn("第 " + loop + " 轮页面异常（累计空转 " + idleStreak + "）");
+        } else if (result === "progress") {
+            // 广告正常看完、面板也读到了，只是天数还没凑够，属于积累进度：不算空转
+            stats.fail++;
+            idleStreak = 0;
+            noadStreak = 0;
+            LOG.info("本条计入提前解锁进度，空转计数清零（继续看下一条）");
         } else if (result === "manual") {
             stats.manual++;
             LOG.err("需要人工处理（验证码/登录），脚本暂停 90 秒等待");
@@ -343,6 +411,13 @@ function main() {
             stats.fail++;
             idleStreak++;
             LOG.warn("第 " + loop + " 轮领取未确认（累计空转 " + idleStreak + "）");
+        }
+
+        // 免费畅听封顶 30 天，到顶就收工（今天再刷也只会拿到 noad）
+        if (F.claimedDay() >= CFG.FREE_DAYS_MAX) {
+            LOG.step("已领取到封顶第 " + F.claimedDay() + " 天，今天到此为止");
+            toast("免费畅听已满 " + CFG.FREE_DAYS_MAX + " 天，明天再来");
+            break;
         }
 
         if (idleStreak >= CFG.IDLE_BEFORE_RESTART) {

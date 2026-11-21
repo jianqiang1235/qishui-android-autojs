@@ -40,6 +40,9 @@ module.exports = {
 
     AD_TIMEOUT_BASE: 28,
     AD_TIMEOUT_MAX: 150,
+    // 连续几轮拿不到广告，就长休息 + 重启 App（广告池没货时死磕只会白白挨风控）
+    NOAD_RESTART_COUNT: 6,
+    NOAD_RESTART_SLEEP: 300000,
 
     // 倒计时到多少秒就认为可以领奖。实测到 0 才变「领取成功」，所以取 0
     CLAIM_BEFORE_SEC: 0,
@@ -70,9 +73,13 @@ module.exports = {
     FREE_ENTRY_RATIO: [0.893, 0.057],
     // 从 OCR 文本里抠天数
     FREE_DAYS_PATTERN: "免\\s*(\\d+)\\s*天",
+    // 免费畅听的封顶天数：非 VIP 用户最多免 30 天，到顶后当天不再给广告
+    // （用户 2026-11-21 明确确认：「非VIP用户，目前最多免费30天」）
+    FREE_DAYS_MAX: 30,
 
     // 点入口后进广告的等待上限（毫秒）
-    FREE_AD_WAIT: 40000,
+    // 点入口后等广告出现的最长等待：正常 3~6 秒就进来，等太久只会在空壳页白耗
+    FREE_AD_WAIT: 18000,
 
     // 「再看X秒继续解锁」弹窗里的「坚持退出」按钮（广告 Activity 内）
     // 实测位置 (360,1006) → 比例
@@ -80,20 +87,43 @@ module.exports = {
     CONTINUE_DIALOG_KEYWORDS: ["再看", "继续解锁", "坚持退出"],
 
     // 领完后 App 内的「再看N个提前享第M天畅听」面板
-    PANEL_KEYWORDS: ["天畅听", "提前享"],
+    PANEL_KEYWORDS: ["天畅听", "提前享", "日畅听", "提醒我每天来"],
     // 面板右上角的 ×（实测 (650,1005) → 比例）
     PANEL_CLOSE_RATIO: [0.903, 0.623],
+    // 另一种「恭喜获得 第N日畅听」面板的 ×（实测 (650,1086)）
+    PANEL_CLOSE_RATIO_ALT: [0.903, 0.674],
     // 面板里「已领取」的判定文字
     PANEL_CLAIMED_DESC: "第%d天畅听",
     PANEL_CLAIMED_KEYWORD: "已领取",
+    // 【实测】还有第二种面板：「恭喜获得 / 第30日畅听 / 提醒我每天来 / 看2个视频 享今日无损音质」，
+    // 控件树里只有一条 desc `第30日畅听`（是「日」不是「天」），没有「已领取」，
+    // 但它出现本身就说明今天这条已经领到了。
+    PANEL_DAY_PATTERN: "第\\s*(\\d+)\\s*[天日]\\s*畅听",
+    PANEL_BONUS_DESC_PATTERN: "第\\s*\\d+\\s*日\\s*畅听",
 
-    /* ---------- 直播间形式广告（实测会随机命中，必须能认出来并退出） ---------- */
+    /* ---------- 直播间形式广告 ---------- */
     // 广告有时不是 19 秒激励视频，而是「直播间」，Activity 是
     // com.luna.music/com.luna.biz.live.plugin.LunaDefaultLivePlayerActivity 或 android.app.Dialog。
-    // 这种形式脚本不参与（要挂 30 秒且带货界面会乱弹券），直接退出重试换一条。
-    LIVE_KEYWORDS: ["本场点赞", "更多直播", "说点什么", "小时榜"],
+    // 【2026-11-21 实测修正】直播间形式【同样计时计奖励】：看够时长后广告容器里同样出现
+    // 「领取成功，关闭，按钮」，点浮层「坚持退出」能正常回 App 并 +1 进度。
+    // 所以不再「退出换一条」，改成等它播完（下面的 LIVE_WATCH_SEC）。
+    LIVE_KEYWORDS: ["本场点赞", "更多直播", "说点什么", "小时榜", "人气榜", "直播间同价"],
     LIVE_ACTIVITY_KEY: "live",
     LIVE_CLOSE_RATIO: [0.936, 0.062],
+    // 直播间播放器 Activity（浮在广告容器之上，需要 back 才能露出广告容器的倒计时/领取成功）
+    LIVE_PLAYER_ACTIVITY_KEY: "luna.biz.live.plugin",
+
+    /* ---------- 直播间上层的「悬浮窗播放功能上线啦」引导弹窗 ---------- */
+    // 实测：退出直播间时这个弹窗会盖在最上层，点直播间的 × 全部打在它身上 → 死循环。
+    // 必须先点「暂不使用」把它关掉。实测「暂不使用」中心 (199,963) → 比例 (0.277,0.598)
+    FLOAT_GUIDE_KEYWORD: "悬浮窗播放功能上线啦",
+    FLOAT_GUIDE_DECLINE_KEYWORDS: ["暂不使用"],
+    FLOAT_GUIDE_DECLINE_RATIO: [0.277, 0.598],
+
+    // 直播间形式广告的等待时长（秒），到时再 back 露出广告容器检查「领取成功」
+    LIVE_WATCH_SEC: 34,
+    // 露出广告容器后最多再等几轮（每轮 6 秒）
+    LIVE_PROBE_ROUNDS: 8,
 
     /* ========== 福利中心（旧路径，会员态下不可用） ========== */
 
