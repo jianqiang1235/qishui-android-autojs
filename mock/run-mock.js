@@ -83,7 +83,18 @@ var cases = [
         expectEnterAd: 0,
         expectLandingEscape: 0,
         expectNoTaps: true,
+        expectMaxTaps: 3,   // 每轮允许点一次底部「发现」tab 回发现页，其余一律不许点
         maxVirtualSec: 1100,
+    },
+    {
+        name: "freedays",
+        desc: "发现页右上「免N天」→ 广告 → 天数 +1（VIP 期间唯一可用路径）",
+        adSeconds: 20,
+        expectClaim: 2,       // 3 轮里首轮建基线，后两轮各 +1
+        expectEnterAd: 3,
+        expectLandingEscape: 0,
+        expectDays: 21,      // 起始免18天，3 轮 +3
+        maxVirtualSec: 500,
     },
 ];
 
@@ -137,10 +148,16 @@ for (var i = 0; i < cases.length; i++) {
     // 关键回归：正常场景里绝对不能出现"误判落地页"
     var falseLanding = c.expectLandingEscape === 0 && st.landingEscaped > 0;
 
-    // 会员态场景里，脚本一次都不该点（点了就会把页面点乱）
-    var passNoTap = !c.expectNoTaps || st.taps === 0;
+    // 会员态场景里，脚本不该进会员页、不该进广告、不该领取；
+    // 允许点底部「发现」tab 回发现页（主路径需要在发现页上工作）
+    var passNoTap = !c.expectNoTaps ||
+        (st.memberPage === 0 && st.enterAd === 0 && st.claimDone === 0 &&
+            st.taps <= (c.expectMaxTaps === undefined ? 0 : c.expectMaxTaps));
 
-    var pass = ok && passClaim && passEnter && passEscape && passTime && !falseLanding && passNoTap;
+    // 「免N天」场景：天数必须真的涨到预期值
+    var passDays = c.expectDays === undefined || stub.scene.days >= c.expectDays;
+
+    var pass = ok && passClaim && passEnter && passEscape && passTime && !falseLanding && passNoTap && passDays;
 
     results.push({
         name: c.name,
@@ -155,6 +172,7 @@ for (var i = 0; i < cases.length; i++) {
         memberPage: st.memberPage,
         doneCount: stub.scene.doneCount,
         coin: stub.scene.coin,
+        days: stub.scene.days,
         virtualSec: virtualSec,
         falseLanding: falseLanding,
         passNoTap: passNoTap,
@@ -175,6 +193,9 @@ for (var r = 0; r < results.length; r++) {
     realLog("  进广告次数  : " + x.enterAd);
     realLog("  落地页退出  : " + x.landingEscaped + " 次");
     realLog("  任务进度    : 已完成 " + x.doneCount + " 次，金币 " + x.coin);
+    if (cases[r].expectDays !== undefined) {
+        realLog("  免费天数    : 免" + x.days + "天（预期 ≥ 免" + cases[r].expectDays + "天）");
+    }
     realLog("  点击次数    : " + x.taps + (x.passNoTap ? "" : "（会员态不应点击，本应 0）"));
     realLog("  会员页进入  : " + x.memberPage + " 次");
     realLog("  虚拟耗时    : " + x.virtualSec + " 秒");

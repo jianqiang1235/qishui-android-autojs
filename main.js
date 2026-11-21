@@ -21,7 +21,9 @@ var SC = require("./lib/screen.js");
 var App = require("./lib/app.js");
 var Ads = require("./lib/ads.js");
 var W = require("./lib/welfare.js");
+var F = require("./lib/freeDays.js");
 
+/** 免费畅听真实进度（落盘在 lib/freeDays.js，跨运行保留） */
 var stats = {
     round: 0,
     success: 0,
@@ -81,35 +83,132 @@ function oneRound() {
         return "manual";
     }
 
-    // 2. 上一轮残留的广告页，先退出来
+    // 2. 上一轮残留的广告页 / 直播间，先退出来
     if (W.inAd()) {
         LOG.info("检测到残留广告页，先退出");
         W.exitAd();
         sleep(1200);
+    } else if (F.isLivePage()) {
+        LOG.info("检测到残留直播间，先退出");
+        F.closeLive();
     }
 
     // 3. 确保 App 在前台
     if (!App.ensureForeground()) return "abnormal";
 
-    // 4. 会员(VIP)状态识别
-    //    实测 VIP 生效期间底部第 4 个 tab 是「会员」，福利中心入口整个消失。
-    //    这种状态下继续盲点只会把页面点到别的 App，所以直接返回 member，交给主循环等。
+    // 4. 主路径：发现页右上角「免N天」→ 激励视频 → 免费畅听 +1 天
+    //    VIP 期间福利中心整个消失，但这个入口一直都在；
+    //    点一下直接进 ExcitingVideoActivity 广告，绕过福利中心那一堆坐标点击。
+    var freeResult = runFreeRound();
+    if (freeResult !== "noentry") return freeResult;
+
+    // 5. 备用路径：福利中心「看广告赚金币」（只有非 VIP 的普通态才有）
+    return welfareRound();
+}
+
+/**
+ * 主路径：发现页「免N天」入口完整一轮
+ * 返回 success / fail / noad / abnormal / manual / noentry（没找到入口，交给备用路径）
+ */
+function runFreeRound() {
+    if (!W.goDiscover()) LOG.warn("没能回到发现页");
+    sleep(1000);
+    F.closePanel();
+
+    var before = F.readDays();
+    LOG.info("当前免费畅听天数: " + (before >= 0 ? "免" + before + "天" : "未读到（OCR 不可用）"));
+
+    if (!F.tapEntry()) return "noentry";
+
+    var enter = F.waitEnterAd();
+    if (enter === "risk") return "manual";
+    if (enter === "live") {
+        LOG.warn("命中直播间形式广告，退出换一条");
+        F.closeLive();
+        return "noad";
+    }
+    if (enter !== "ad") {
+        LOG.warn("点了「免N天」没进广告（当前 " + W.activity() + "）");
+        return "noad";
+    }
+
+    if (!Ads.waitAdFinish()) {
+        LOG.warn("没识别到有效倒计时");
+        W.exitAd();
+        return "noad";
+    }
+
+    var claimResult = Ads.claim();
+
+    // 广告里的「再看X秒继续解锁 / 第N日免费听」→ 点「坚持退出」回 App
+    F.closeContinueDialog();
+    sleep(1200);
+
+    // 回 App 后等天数面板
+    var panel = { day: -1, claimed: false };
+    for (var i = 0; i < 6; i++) {
+        if (!W.inApp()) {
+            App.ensureForeground();
+            sleep(1500);
+            continue;
+        }
+        W.invalidate();
+        F.invalidate();
+
+        panel = F.panelClaimed();
+        if (panel.claimed && panel.day > 0) break;
+        sleep(1500);
+    }
+
+    // 关掉「再看N个提前享第M天畅听」面板
+    F.closePanel();
+
+    if (panel.claimed && panel.day > 0) {
+        // 【关键】「第N天畅听 已领取」是唯一可信的进度：
+        // 免费畅听是连环任务，天数越往后每天要看的广告越多（实测第22天要连看3条），
+        // 一条广告看完次数不够时天数根本不会涨，面板仍然停在同一个「已领取」天数。
+        // 所以只有「已领取」的天数真的变大，才算这一轮有进展。
+        if (F.claimedDay() < 0) {
+            F.setClaimedDay(panel.day);
+            LOG.info("建立进度基线：已领取到第" + panel.day + "天");
+            return "fail";
+        }
+        if (panel.day > F.claimedDay()) {
+            LOG.step("已领取天数 " + F.claimedDay() + " → " + panel.day + "，本轮 +1 天");
+            F.setClaimedDay(panel.day);
+            F.rememberDays(panel.day);
+            return "success";
+        }
+        LOG.info("已领取天数仍是第" + panel.day + "天，本条广告计入提前解锁进度（尚未 +1 天）");
+        return "fail";
+    }
+
+    if (claimResult === -1) return "abnormal";
+    if (claimResult === 1) {
+        LOG.info("已确认领取，但没弹天数面板，本轮不计入成功");
+    }
+    return "fail";
+}
+
+/**
+ * 备用路径：福利中心 → 看广告赚金币（旧流程，普通态才可用）
+ */
+function welfareRound() {
+    // VIP 生效期间底部第 4 个 tab 是「会员」，福利中心入口整个消失，
+    // 这种状态下继续盲点只会把页面点到别的 App，所以直接返回 member 交给主循环等。
     if (!W.isInWelfareCenter() && W.isMemberState() && !W.hasCoinEntry()) {
         LOG.warn(CFG.MEMBER_STATE_HINT + "（底部 tab: " + W.tabText() + "）");
         return "member";
     }
 
-    // 5. 进福利中心（金币入口 / 福利 tab / 坐标兜底）
     if (!W.enterWelfareCenter()) {
         LOG.warn("本轮没能进入福利中心");
         return "noad";
     }
 
-    // 6. 记录点之前的进度，用于事后校验
     var before = W.doneCount();
     LOG.info("本轮开始前进度：已完成 " + (before >= 0 ? before : "?") + " 次");
 
-    // 7. 点「看广告赚金币 → 去完成」
     var started = W.startAdTask();
     if (started === "risk") return "manual";
     if (started !== "ad") {
@@ -117,21 +216,17 @@ function oneRound() {
         return "noad";
     }
 
-    // 8. 等倒计时（自适应 + 卡死检测）
     if (!Ads.waitAdFinish()) {
         LOG.warn("本轮没有识别到有效倒计时");
         W.exitAd();
         return "noad";
     }
 
-    // 9. 领奖（确认到「领取成功」才算）
     var claimResult = Ads.claim();
 
-    // 10. 退出广告返回福利中心
     W.exitAd();
     sleep(1800);
 
-    // 11. 用真实进度变化做最终判定
     if (W.enterWelfareCenter()) {
         var after = W.doneCount();
         if (before >= 0 && after >= 0) {
@@ -180,7 +275,9 @@ function main() {
 
     keepScreenAwake();
     SC.ensureCapture();
-    LOG.info("OCR 可用: " + SC.ocrAvailable());
+    var ocrOk = SC.probeOcr();
+    LOG.info("OCR 可用: " + ocrOk + (ocrOk ? "" : "（未装 OCR 插件，走控件+坐标模式）"));
+    F.loadProgress();
 
     if (!App.launch(3)) {
         LOG.err("无法启动 " + CFG.APP_NAME + "，请确认已安装并已登录");

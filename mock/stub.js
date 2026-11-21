@@ -58,18 +58,30 @@ function node(text, desc, clickable, box) {
 /* ---------- 场景状态机 ---------- */
 
 var scene = {
-    mode: "normal",      // normal / noad / landing / risk / member
+    mode: "normal",      // normal / noad / landing / risk / member / freedays
     phase: "player",     // player / welfare / ad / claim / shop / risk / member
+                         // / discover / continue / panel（后三个是「免N天」路径）
     adStart: 0,
     adSeconds: 20,
     doneCount: 0,        // 「看广告赚金币 已完成N次」
     coin: 0,             // 金币收益
+    days: 18,            // 「免N天」当前天数
+    ocrExtra: null,      // 只出现在 OCR 里、控件树里没有的文字（真机「免18天」就是这种）
     stats: { taps: 0, enterAd: 0, claimDone: 0, landingEscaped: 0, ocrCalls: 0, memberPage: 0 },
 };
+
+/** 真机实测：右上角「免N天」是 Flutter 自绘，控件树里没有节点，只有 OCR 认得出来 */
+function refreshOcrExtra() {
+    var show = (scene.phase === "discover" || scene.phase === "panel" || scene.phase === "continue");
+    scene.ocrExtra = show
+        ? [{ label: "免" + scene.days + "天" }]
+        : null;
+}
 
 function goPhase(p) {
     scene.phase = p;
     if (p === "ad") scene.adStart = clock;
+    refreshOcrExtra();
 }
 
 function remainingSec() {
@@ -179,6 +191,36 @@ function currentNodes() {
         list.push(node("", "完成", true, rect(30, 100, 200, 170)));
         list.push(node("", "立即下载", true, rect(300, 1300, 690, 1380)));
 
+    } else if (scene.phase === "discover") {
+        // 发现页（实测：模式探索 / 活动中心 列表）
+        // 右上角「免18天」不在控件树里，只能靠 OCR —— 见 ocr.detect 里的 ocrExtra
+        list.push(node("模式探索", "", false, rect(30, 120, 300, 180)));
+        list.push(node("", "活动中心 每日上新", false, rect(30, 240, 690, 300)));
+        list.push(node("正在热播", "", false, rect(30, 380, 300, 430)));
+        list.push(node("", "热歌推荐 每日更新", false, rect(30, 460, 690, 520)));
+        // 会员态底部 tab：「免N天」入口在 VIP 期间照样存在
+        list.push(node("发现", "", true, rect(34, 1511, 110, 1554)));
+        list.push(node("听抖音", "", true, rect(159, 1507, 273, 1558)));
+        list.push(node("音乐", "", true, rect(343, 1511, 419, 1554)));
+        list.push(node("会员", "", true, rect(466, 1507, 542, 1558)));
+        list.push(node("我的", "", true, rect(610, 1507, 686, 1558)));
+
+    } else if (scene.phase === "continue") {
+        // 点广告右上角后弹的「再看X秒继续解锁 / 第N日免费听」
+        list.push(node("", "再看19秒继续解锁，第20日免费听", false, rect(30, 700, 690, 820)));
+        list.push(node("", "继续观看", true, rect(160, 860, 560, 940)));
+        list.push(node("", "坚持退出", true, rect(160, 960, 560, 1052)));
+
+    } else if (scene.phase === "panel") {
+        // 回 App 弹的「再看N个提前享第M天畅听」面板
+        list.push(node("", "再看4个提前享第" + (scene.days + 1) + "天畅听", false, rect(60, 700, 660, 770)));
+        list.push(node("", "恭喜获得第" + scene.days + "天免费时长畅听", false, rect(60, 800, 660, 860)));
+        list.push(node("", "第" + scene.days + "天畅听 已领取", false, rect(60, 900, 350, 1000)));
+        list.push(node("", "第" + (scene.days + 1) + "天畅听 再看4个提前领", false, rect(370, 900, 660, 1000)));
+        list.push(node("", "解锁第" + (scene.days + 1) + "天畅听", true, rect(60, 1300, 660, 1360)));
+        list.push(node("", "关闭，按钮", true, rect(620, 975, 680, 1035)));
+        list.push(node("发现", "", true, rect(34, 1511, 110, 1554)));
+
     } else if (scene.phase === "risk") {
         // 字节风控短信验证页
         list.push(node("输入验证码", "", false, rect(64, 196, 344, 272)));
@@ -282,6 +324,14 @@ global.click = function (x, y) {
             }
         }
     }
+    // 发现页右上角「免N天」真机没有控件节点，OCR 给出坐标后直接点这里
+    if (scene.phase === "discover" && x >= 570 && x <= 660 && y >= 55 && y <= 130) {
+        scene.stats.taps++;
+        console.log("    [mock 点击] 免" + scene.days + "天 @ " + x + "," + y);
+        scene.stats.enterAd++;
+        goPhase("ad");
+        return true;
+    }
     return false;
 };
 
@@ -323,10 +373,33 @@ function handleTap(text, desc, x, y) {
     if ((scene.phase === "ad" || scene.phase === "claim") && desc.indexOf("领取成功") >= 0) {
         if (scene.phase === "claim") {
             scene.stats.claimDone++;
+            if (scene.mode === "freedays") {
+                // 免N天路径：天数 +1，然后弹「再看X秒继续解锁」
+                scene.days++;
+                goPhase("continue");
+                return;
+            }
             scene.doneCount++;
             scene.coin += 2370;
         }
         goPhase("welfare");
+        return;
+    }
+
+    // 「再看X秒继续解锁」弹窗 → 点「坚持退出」回 App，弹天数面板
+    if (scene.phase === "continue" && desc === "坚持退出") {
+        goPhase("panel");
+        return;
+    }
+
+    // 天数面板 → 点右上角 × 关掉
+    if (scene.phase === "panel" && desc === "关闭，按钮") {
+        goPhase("discover");
+        return;
+    }
+
+    // 发现页点「发现」tab：已在发现页，不动
+    if (scene.phase === "discover" && text === "发现") {
         return;
     }
 
@@ -371,7 +444,7 @@ var foreground = "com.luna.music";
 global.currentPackage = function () { return foreground; };
 
 global.currentActivity = function () {
-    if (scene.phase === "ad" || scene.phase === "claim") {
+    if (scene.phase === "ad" || scene.phase === "claim" || scene.phase === "continue") {
         return "com.ss.android.excitingvideo.ExcitingVideoActivity";
     }
     if (scene.phase === "risk") {
@@ -450,6 +523,11 @@ global.ocr = {
             if (!t) continue;
             out.push({ label: t, confidence: 0.95, bounds: nodes[i].bounds() });
         }
+        // 控件树里认不出来的文字（真机「免18天」就是 Flutter 自绘）
+        var extra = scene.ocrExtra || [];
+        for (var k = 0; k < extra.length; k++) {
+            out.push({ label: extra[k].label, confidence: 0.9, bounds: rect(579, 63, 634, 121) });
+        }
         return out;
     },
     recognizeText: function () {
@@ -468,13 +546,16 @@ module.exports = {
         clock = 0;
         baseMs = realNow();
         scene.mode = mode || "normal";
-        scene.phase = "player";
+        scene.phase = (mode === "freedays") ? "discover" : "player";
         scene.adStart = 0;
         scene.adSeconds = adSeconds || 20;
         scene.doneCount = 0;
         scene.coin = 0;
+        scene.days = 18;
+        scene.ocrExtra = null;
         scene.stats = { taps: 0, enterAd: 0, claimDone: 0, landingEscaped: 0, ocrCalls: 0, memberPage: 0 };
         foreground = "com.luna.music";
         memfs = {};
+        refreshOcrExtra();
     },
 };
