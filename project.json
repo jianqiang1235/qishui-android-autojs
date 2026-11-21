@@ -1,0 +1,13 @@
+{
+  "name": "汽水音乐自动领福利",
+  "packageName": "com.qishui.welfare.auto",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "main": "main.js",
+  "assets": [],
+  "launchConfig": {
+    "displaySplash": true,
+    "hideLogs": false,
+    "splashText": "汽水音乐自动领福利"
+  }
+}
