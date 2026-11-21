@@ -3,10 +3,15 @@
  *
  * 用法：node mock/run-mock.js
  *
- * 三个场景：
- *   normal  —— 35 秒广告（故意超过上游固定 30s 超时），验证自适应不会误判
- *   landing —— 广告结束跳电商落地页，验证三层兜底能退出来
- *   noad    —— 广告页没有倒计时，验证快速失败而不是空转 150 秒
+ * 四个场景（2026-11-21 按安卓真机界面重写）：
+ *   normal  —— 20 秒激励视频，验证「金币入口 → 福利中心 → 去完成 → 领取成功」整条链路
+ *   landing —— 广告结束跳出商品落地页，验证三层兜底能退回来
+ *   noad    —— 点「去完成」没反应，验证快速失败而不是空转 150 秒
+ *   risk    —— 触发字节风控短信验证，验证脚本会停下等人而不是乱点
+ *
+ * 另外每个场景都会顺带验证一件事：
+ *   广告正片自带的「商家推荐 / 精彩应用 / 立即下载」不能再被误判成落地页
+ *   （iOS 版踩过这个坑，安卓这版重写时又差点中招）
  */
 
 var stub = require("./stub.js");
@@ -34,9 +39,52 @@ CFG.LOG_OVERWRITE = true;
 CFG.IDLE_SLEEP = 8000;
 
 var cases = [
-    { name: "normal", desc: "35 秒广告，正常领奖", expectClaim: 3, expectLandingEscape: 0 },
-    { name: "landing", desc: "广告结束跳落地页", expectClaim: 0, expectLandingEscape: 1 },
-    { name: "noad", desc: "无倒计时（无广告）", expectClaim: 0, expectLandingEscape: 0 },
+    {
+        name: "normal",
+        desc: "20 秒激励视频，正常领奖 3 轮",
+        adSeconds: 20,
+        expectClaim: 3,
+        expectEnterAd: 3,
+        expectLandingEscape: 0,
+        maxVirtualSec: 400,
+    },
+    {
+        name: "landing",
+        desc: "广告结束跳商品落地页",
+        adSeconds: 20,
+        expectClaim: 0,
+        expectEnterAd: 1,
+        expectLandingEscape: 1,
+        maxVirtualSec: 400,
+    },
+    {
+        name: "noad",
+        desc: "点去完成没有广告（应快速失败）",
+        adSeconds: 20,
+        expectClaim: 0,
+        expectEnterAd: 0,
+        expectLandingEscape: 0,
+        maxVirtualSec: 400,
+    },
+    {
+        name: "risk",
+        desc: "触发字节风控短信验证（应停下等人）",
+        adSeconds: 20,
+        expectClaim: 0,
+        expectEnterAd: 1,
+        expectLandingEscape: 0,
+        maxVirtualSec: 600,
+    },
+    {
+        name: "member",
+        desc: "会员(VIP)态，福利中心无入口（应一次都不乱点）",
+        adSeconds: 20,
+        expectClaim: 0,
+        expectEnterAd: 0,
+        expectLandingEscape: 0,
+        expectNoTaps: true,
+        maxVirtualSec: 1100,
+    },
 ];
 
 var results = [];
@@ -49,7 +97,7 @@ for (var i = 0; i < cases.length; i++) {
     console.warn = fakeLog;
     console.error = fakeLog;
 
-    stub.reset(c.name, 35);
+    stub.reset(c.name, c.adSeconds);
 
     // 清掉模块缓存，让 main.js 重新执行
     // 注意：config.js 必须保留在缓存里，否则 MAX_LOOP_COUNT 会被重置为 0（不限轮次 → 死循环）
@@ -79,11 +127,20 @@ for (var i = 0; i < cases.length; i++) {
 
     var st = stub.scene.stats;
     var logText = buf.join("\n");
-    var virtualMs = stub.clock();
+    var virtualSec = Math.round(stub.clock() / 1000);
 
     var passClaim = c.expectClaim === 0 ? st.claimDone === 0 : st.claimDone >= c.expectClaim;
+    var passEnter = st.enterAd >= c.expectEnterAd;
     var passEscape = st.landingEscaped >= c.expectLandingEscape;
-    var pass = ok && passClaim && passEscape;
+    var passTime = virtualSec <= c.maxVirtualSec;
+
+    // 关键回归：正常场景里绝对不能出现"误判落地页"
+    var falseLanding = c.expectLandingEscape === 0 && st.landingEscaped > 0;
+
+    // 会员态场景里，脚本一次都不该点（点了就会把页面点乱）
+    var passNoTap = !c.expectNoTaps || st.taps === 0;
+
+    var pass = ok && passClaim && passEnter && passEscape && passTime && !falseLanding && passNoTap;
 
     results.push({
         name: c.name,
@@ -92,10 +149,15 @@ for (var i = 0; i < cases.length; i++) {
         ok: ok,
         errMsg: errMsg,
         claimDone: st.claimDone,
+        enterAd: st.enterAd,
         landingEscaped: st.landingEscaped,
         taps: st.taps,
-        enterAd: st.enterAd,
-        virtualSec: Math.round(virtualMs / 1000),
+        memberPage: st.memberPage,
+        doneCount: stub.scene.doneCount,
+        coin: stub.scene.coin,
+        virtualSec: virtualSec,
+        falseLanding: falseLanding,
+        passNoTap: passNoTap,
         log: logText,
     });
 }
@@ -108,17 +170,20 @@ for (var r = 0; r < results.length; r++) {
     var x = results[r];
     realLog("");
     realLog("场景 " + x.name + " —— " + x.desc);
-    realLog("  结果      : " + (x.pass ? "PASS" : "FAIL"));
-    realLog("  领奖次数  : " + x.claimDone + "（预期 " + cases[r].expectClaim + "）");
-    realLog("  落地页退出: " + x.landingEscaped + " 次");
-    realLog("  点击次数  : " + x.taps);
-    realLog("  进广告次数: " + x.enterAd);
-    realLog("  虚拟耗时  : " + x.virtualSec + " 秒");
-    if (!x.ok) realLog("  异常      : " + x.errMsg);
+    realLog("  结果        : " + (x.pass ? "PASS" : "FAIL"));
+    realLog("  领奖次数    : " + x.claimDone + "（预期 " + cases[r].expectClaim + "）");
+    realLog("  进广告次数  : " + x.enterAd);
+    realLog("  落地页退出  : " + x.landingEscaped + " 次");
+    realLog("  任务进度    : 已完成 " + x.doneCount + " 次，金币 " + x.coin);
+    realLog("  点击次数    : " + x.taps + (x.passNoTap ? "" : "（会员态不应点击，本应 0）"));
+    realLog("  会员页进入  : " + x.memberPage + " 次");
+    realLog("  虚拟耗时    : " + x.virtualSec + " 秒");
+    if (x.falseLanding) realLog("  ⚠ 出现落地页误判（广告自带 panel 被当成落地页）");
+    if (!x.ok) realLog("  异常        : " + x.errMsg);
     if (!x.pass) {
-        realLog("  日志尾部  :");
+        realLog("  日志尾部    :");
         var lines = x.log.split("\n");
-        for (var q = Math.max(0, lines.length - 12); q < lines.length; q++) {
+        for (var q = Math.max(0, lines.length - 14); q < lines.length; q++) {
             realLog("    " + lines[q]);
         }
     }
