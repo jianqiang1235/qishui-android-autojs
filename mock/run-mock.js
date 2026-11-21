@@ -10,6 +10,11 @@
  */
 
 var stub = require("./stub.js");
+var pathMod = require("path");
+
+// 项目根目录（本文件在 <项目根>/mock/ 下）
+// 注意：不能用硬编码目录名判断，clone 到别的目录名时会导致缓存清不掉、只有第一个场景真正执行
+var PROJECT_ROOT = pathMod.resolve(__dirname, "..");
 
 var buf = [];
 var realLog = console.log;
@@ -50,7 +55,7 @@ for (var i = 0; i < cases.length; i++) {
     // 注意：config.js 必须保留在缓存里，否则 MAX_LOOP_COUNT 会被重置为 0（不限轮次 → 死循环）
     var keys = Object.keys(require.cache);
     for (var k = 0; k < keys.length; k++) {
-        if (keys[k].indexOf("qishui-android-autojs") >= 0 &&
+        if (keys[k].indexOf(PROJECT_ROOT) >= 0 &&
             keys[k].indexOf("stub.js") < 0 &&
             keys[k].indexOf("config.js") < 0 &&
             keys[k].indexOf("run-mock.js") < 0) {

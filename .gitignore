@@ -1,0 +1,15 @@
+# 运行产物
+run.log
+*.log
+mock/run-mock.log
+
+# 编辑器
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 打包产物
+*.apk
+*.aab
+build/
